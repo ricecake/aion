@@ -5,9 +5,12 @@ Copyright © 2019 Sebastian Green-Husted <geoffcake@gmail.com>
 package cmd
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 
+	"github.com/gin-gonic/gin"
 	"github.com/hashicorp/memberlist"
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/pborman/uuid"
@@ -15,7 +18,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"go.etcd.io/bbolt"
+	//"github.com/tidwall/gjson"
+	bolt "go.etcd.io/bbolt"
 )
 
 var cfgFile string
@@ -23,6 +27,14 @@ var cfgFile string
 var (
 	broadcasts *memberlist.TransmitLimitedQueue
 )
+
+type task struct {
+	Name       string
+	Code       string
+	Definition string
+	Command    string
+	id         int
+}
 
 type delegate struct{}
 
@@ -63,14 +75,49 @@ var rootCmd = &cobra.Command{
 	Short: "A brief description of your application",
 	Long:  `A longer description`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("%+v\n", viper.AllSettings())
-		db, err := bbolt.Open(viper.GetString("db.file"), 0600, nil)
+		db, err := bolt.Open(viper.GetString("db.file"), 0600, nil)
 		if err != nil {
 			log.Fatal(err)
 		}
 		defer db.Close()
 
 		sched := cron.New()
+
+		dbErr := db.Update(func(tx *bolt.Tx) error {
+			// Assume bucket exists and has keys
+			b, bErr := tx.CreateBucketIfNotExists([]byte("tasks"))
+			if bErr != nil {
+				return bErr
+			}
+
+			b.ForEach(func(k, v []byte) error {
+				var oldTask task
+				jsonErr := json.Unmarshal(v, &oldTask)
+				if jsonErr != nil {
+					return jsonErr
+				}
+
+				newId, addErr := sched.AddFunc(oldTask.Definition, func() {
+					fmt.Println(oldTask.Name + " " + oldTask.Code)
+				})
+				if addErr != nil {
+					return addErr
+				}
+				oldTask.id = int(newId)
+
+				jsonData, jsonErr := json.Marshal(oldTask)
+				if jsonErr != nil {
+					return jsonErr
+				}
+
+				return b.Put([]byte(oldTask.Code), jsonData)
+			})
+			return nil
+		})
+		if dbErr != nil {
+			log.Fatal(dbErr)
+		}
+
 		sched.Start()
 		defer sched.Stop()
 
@@ -78,26 +125,84 @@ var rootCmd = &cobra.Command{
 		c := memberlist.DefaultLocalConfig()
 		c.Events = &eventDelegate{}
 		c.Delegate = &delegate{}
-		c.BindPort = 0
-		c.Name = hostname + "-" + uuid.NewUUID().String()
+		c.BindPort = viper.GetInt("local.gossip")
+		c.Name = hostname + "-" + uuid.NewRandom().String()
+
 		m, err := memberlist.Create(c)
 		if err != nil {
 			log.Fatal(err)
 		}
+
 		if viper.IsSet("members") {
 			_, err := m.Join(viper.GetStringSlice("members"))
 			if err != nil {
-				log.Fatal(err)
+				log.Error(err)
 			}
 		}
+
 		broadcasts = &memberlist.TransmitLimitedQueue{
 			NumNodes: func() int {
 				return m.NumMembers()
 			},
 			RetransmitMult: 3,
 		}
+
 		node := m.LocalNode()
-		fmt.Printf("Local member %s:%d\n", node.Addr, node.Port)
+		log.Printf("Local member %s:%d\n", node.Addr, node.Port)
+
+		gin.SetMode("debug")
+		r := gin.New()
+
+		r.GET("/info", func(c *gin.Context) {
+			c.JSON(200, map[string]interface{}{
+				"members": m.Members(),
+			})
+		})
+
+		r.PUT("/task/:name", func(c *gin.Context) {
+			name := c.Param("name")
+
+			newTask := task{
+				Name:       name,
+				Code:       CompactUUID(),
+				Definition: "* * * * *",
+				Command:    "Test command",
+			}
+
+			err := db.Update(func(tx *bolt.Tx) error {
+				// Assume bucket exists and has keys
+				b, bErr := tx.CreateBucketIfNotExists([]byte("tasks"))
+				if bErr != nil {
+					return bErr
+				}
+
+				newId, addErr := sched.AddFunc(newTask.Definition, func() {
+					fmt.Println(newTask.Name + " " + newTask.Code)
+				})
+				if addErr != nil {
+					return addErr
+				}
+				newTask.id = int(newId)
+
+				jsonData, jsonErr := json.Marshal(newTask)
+				if jsonErr != nil {
+					return jsonErr
+				}
+
+				return b.Put([]byte(newTask.Code), jsonData)
+			})
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			c.JSON(200, newTask)
+		})
+
+		ginInterface := viper.GetString("local.http.interface")
+		ginPort := viper.GetInt("local.http.port")
+		ginRunOn := fmt.Sprintf("%s:%d", ginInterface, ginPort)
+
+		r.Run(ginRunOn) // listen and serve on 0.0.0.0:8080
 	},
 }
 
@@ -133,4 +238,8 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Println("Using config file:", viper.ConfigFileUsed())
 	}
+}
+
+func CompactUUID() string {
+	return base64.RawURLEncoding.EncodeToString([]byte(uuid.NewRandom()))
 }

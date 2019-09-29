@@ -1,9 +1,9 @@
 db:
-  file: ./test.db
+  file: ./test2.db
 local:
-  gossip: 4001
+  gossip: 4002
   http:
-    port: 8080
+    port: 8081
     interface: 127.0.0.1
 members:
   - 127.0.0.1:4001
