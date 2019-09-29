@@ -43,6 +43,7 @@ func (d *delegate) NodeMeta(limit int) []byte {
 }
 
 func (d *delegate) NotifyMsg(b []byte) {
+	fmt.Println(string(b))
 }
 
 func (d *delegate) GetBroadcasts(overhead, limit int) [][]byte {
@@ -68,6 +69,25 @@ func (ed *eventDelegate) NotifyLeave(node *memberlist.Node) {
 
 func (ed *eventDelegate) NotifyUpdate(node *memberlist.Node) {
 	fmt.Println("A node was updated: " + node.String())
+}
+
+type broadcast struct {
+	msg    []byte
+	notify chan<- struct{}
+}
+
+func (b *broadcast) Invalidates(other memberlist.Broadcast) bool {
+	return false
+}
+
+func (b *broadcast) Message() []byte {
+	return b.msg
+}
+
+func (b *broadcast) Finished() {
+	if b.notify != nil {
+		close(b.notify)
+	}
 }
 
 var rootCmd = &cobra.Command{
@@ -212,6 +232,11 @@ var rootCmd = &cobra.Command{
 				if jsonErr != nil {
 					return jsonErr
 				}
+
+				broadcasts.QueueBroadcast(&broadcast{
+					msg:    jsonData,
+					notify: nil,
+				})
 
 				return b.Put([]byte(newTask.Code), jsonData)
 			})
