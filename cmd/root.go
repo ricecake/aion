@@ -221,6 +221,9 @@ var rootCmd = &cobra.Command{
 				}
 
 				newId, addErr := sched.AddFunc(newTask.Definition, func() {
+					// grab the memberlist, and then use rendezvous hashing to
+					// decide if this node, or another, is the real one that should
+					// do the execution of the task
 					fmt.Println(newTask.Name + " " + newTask.Code)
 				})
 				if addErr != nil {
