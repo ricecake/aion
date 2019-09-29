@@ -6,30 +6,100 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+
+	"github.com/hashicorp/memberlist"
 	homedir "github.com/mitchellh/go-homedir"
+	"github.com/pborman/uuid"
 	"github.com/robfig/cron/v3"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"os"
+	"go.etcd.io/bbolt"
 )
 
 var cfgFile string
 
-// rootCmd represents the base command when called without any subcommands
+var (
+	broadcasts *memberlist.TransmitLimitedQueue
+)
+
+type delegate struct{}
+
+func (d *delegate) NodeMeta(limit int) []byte {
+	return []byte{}
+}
+
+func (d *delegate) NotifyMsg(b []byte) {
+}
+
+func (d *delegate) GetBroadcasts(overhead, limit int) [][]byte {
+	return broadcasts.GetBroadcasts(overhead, limit)
+}
+
+func (d *delegate) LocalState(join bool) []byte {
+	return []byte{}
+}
+
+func (d *delegate) MergeRemoteState(buf []byte, join bool) {
+}
+
+type eventDelegate struct{}
+
+func (ed *eventDelegate) NotifyJoin(node *memberlist.Node) {
+	fmt.Println("A node has joined: " + node.String())
+}
+
+func (ed *eventDelegate) NotifyLeave(node *memberlist.Node) {
+	fmt.Println("A node has left: " + node.String())
+}
+
+func (ed *eventDelegate) NotifyUpdate(node *memberlist.Node) {
+	fmt.Println("A node was updated: " + node.String())
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "aion",
 	Short: "A brief description of your application",
-	Long: `A longer description that spans multiple lines and likely contains
-examples and usage of using your application. For example:
+	Long:  `A longer description`,
+	Run: func(cmd *cobra.Command, args []string) {
+		db, err := bbolt.Open(viper.GetString("./db.file"), 0600, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer db.Close()
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {},
+		sched := cron.New()
+		sched.Start()
+		defer sched.Stop()
+
+		hostname, _ := os.Hostname()
+		c := memberlist.DefaultLocalConfig()
+		c.Events = &eventDelegate{}
+		c.Delegate = &delegate{}
+		c.BindPort = 0
+		c.Name = hostname + "-" + uuid.NewUUID().String()
+		m, err := memberlist.Create(c)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if viper.IsSet("members") {
+			_, err := m.Join(viper.GetStringSlice("members"))
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		broadcasts = &memberlist.TransmitLimitedQueue{
+			NumNodes: func() int {
+				return m.NumMembers()
+			},
+			RetransmitMult: 3,
+		}
+		node := m.LocalNode()
+		fmt.Printf("Local member %s:%d\n", node.Addr, node.Port)
+	},
 }
 
-// Execute adds all child commands to the root command and sets flags appropriately.
-// This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -39,39 +109,26 @@ func Execute() {
 
 func init() {
 	cobra.OnInitialize(initConfig)
-
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
-
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.aion.yaml)")
-
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
 
-// initConfig reads in config file and ENV variables if set.
 func initConfig() {
 	if cfgFile != "" {
-		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
 	} else {
-		// Find home directory.
 		home, err := homedir.Dir()
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
 
-		// Search config in home directory with name ".aion" (without extension).
 		viper.AddConfigPath(home)
 		viper.SetConfigName(".aion")
 	}
 
-	viper.AutomaticEnv() // read in environment variables that match
+	viper.AutomaticEnv()
 
-	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Println("Using config file:", viper.ConfigFileUsed())
 	}

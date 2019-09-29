@@ -10,7 +10,7 @@ deps:
 	go mod tidy
 
 build:
-	go build -mod=vendor -o bin/aion
+	go build -o bin/aion
 
 release:
-	go build -mod=vendor -ldflags "-s -w" -o bin/aion
+	go build -ldflags "-s -w" -o bin/aion
