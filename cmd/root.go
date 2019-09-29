@@ -63,7 +63,8 @@ var rootCmd = &cobra.Command{
 	Short: "A brief description of your application",
 	Long:  `A longer description`,
 	Run: func(cmd *cobra.Command, args []string) {
-		db, err := bbolt.Open(viper.GetString("./db.file"), 0600, nil)
+		fmt.Printf("%+v\n", viper.AllSettings())
+		db, err := bbolt.Open(viper.GetString("db.file"), 0600, nil)
 		if err != nil {
 			log.Fatal(err)
 		}

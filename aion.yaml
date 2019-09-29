@@ -1,6 +1,5 @@
----
 db:
-  file: test.db
+  file: ./test.db
 members:
   - 127.0.0.1:4001
   - 127.0.0.1:4002
