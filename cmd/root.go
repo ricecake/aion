@@ -154,8 +154,32 @@ var rootCmd = &cobra.Command{
 		r := gin.New()
 
 		r.GET("/info", func(c *gin.Context) {
+			var taskList []task
+			dbErr := db.Update(func(tx *bolt.Tx) error {
+				// Assume bucket exists and has keys
+				b, bErr := tx.CreateBucketIfNotExists([]byte("tasks"))
+				if bErr != nil {
+					return bErr
+				}
+
+				b.ForEach(func(k, v []byte) error {
+					var oldTask task
+					jsonErr := json.Unmarshal(v, &oldTask)
+					if jsonErr != nil {
+						return jsonErr
+					}
+					taskList = append(taskList, oldTask)
+					return nil
+				})
+				return nil
+			})
+			if dbErr != nil {
+				log.Error(dbErr)
+			}
+
 			c.JSON(200, map[string]interface{}{
 				"members": m.Members(),
+				"tasks":   taskList,
 			})
 		})
 
