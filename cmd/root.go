@@ -26,6 +26,8 @@ var cfgFile string
 
 var (
 	broadcasts *memberlist.TransmitLimitedQueue
+	db         *bolt.DB
+	sched      *cron.Cron
 )
 
 type task struct {
@@ -36,6 +38,19 @@ type task struct {
 	id         int
 }
 
+type ActionType int
+
+const (
+	ADD ActionType = iota
+	REMOVE
+	UPDATE
+)
+
+type action struct {
+	Task task
+	Type ActionType
+}
+
 type delegate struct{}
 
 func (d *delegate) NodeMeta(limit int) []byte {
@@ -44,17 +59,131 @@ func (d *delegate) NodeMeta(limit int) []byte {
 
 func (d *delegate) NotifyMsg(b []byte) {
 	fmt.Println(string(b))
+	var actionMsg action
+	jsonErr := json.Unmarshal(b, &actionMsg)
+	if jsonErr != nil {
+		log.Error(jsonErr)
+	}
+	switch actionMsg.Type {
+	case ADD:
+		err := db.Update(func(tx *bolt.Tx) error {
+			// Assume bucket exists and has keys
+			b, bErr := tx.CreateBucketIfNotExists([]byte("tasks"))
+			if bErr != nil {
+				return bErr
+			}
+
+			if b.Get([]byte(actionMsg.Task.Code)) != nil {
+				return nil
+			}
+
+			newId, addErr := sched.AddFunc(actionMsg.Task.Definition, func() {
+				// grab the memberlist, and then use rendezvous hashing to
+				// decide if this node, or another, is the real one that should
+				// do the execution of the task
+				fmt.Println(actionMsg.Task.Name + " " + actionMsg.Task.Code)
+			})
+			if addErr != nil {
+				return addErr
+			}
+			actionMsg.Task.id = int(newId)
+
+			jsonData, jsonErr := json.Marshal(actionMsg.Task)
+			if jsonErr != nil {
+				return jsonErr
+			}
+
+			return b.Put([]byte(actionMsg.Task.Code), jsonData)
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Error("Unsupported message type")
+	}
 }
 
 func (d *delegate) GetBroadcasts(overhead, limit int) [][]byte {
-	return broadcasts.GetBroadcasts(overhead, limit)
+	if broadcasts != nil {
+		return broadcasts.GetBroadcasts(overhead, limit)
+	} else {
+		return [][]byte{}
+	}
+}
+
+type stateDump struct {
+	Tasks []task
 }
 
 func (d *delegate) LocalState(join bool) []byte {
-	return []byte{}
+	var response stateDump
+	dbErr := db.View(func(tx *bolt.Tx) error {
+		// Assume bucket exists and has keys
+		b := tx.Bucket([]byte("tasks"))
+
+		b.ForEach(func(k, v []byte) error {
+			var oldTask task
+			jsonErr := json.Unmarshal(v, &oldTask)
+			if jsonErr != nil {
+				return jsonErr
+			}
+			response.Tasks = append(response.Tasks, oldTask)
+			return nil
+		})
+		return nil
+	})
+	if dbErr != nil {
+		log.Error(dbErr)
+	}
+
+	jsonData, jsonErr := json.Marshal(response)
+	if jsonErr != nil {
+		log.Error(jsonErr)
+	}
+	return []byte(jsonData)
 }
 
 func (d *delegate) MergeRemoteState(buf []byte, join bool) {
+	var response stateDump
+	jsonErr := json.Unmarshal(buf, &response)
+	if jsonErr != nil {
+		log.Error(jsonErr)
+	}
+
+	for _, task := range response.Tasks {
+		err := db.Update(func(tx *bolt.Tx) error {
+			// Assume bucket exists and has keys
+			b, bErr := tx.CreateBucketIfNotExists([]byte("tasks"))
+			if bErr != nil {
+				return bErr
+			}
+
+			if b.Get([]byte(task.Code)) != nil {
+				return nil
+			}
+
+			newId, addErr := sched.AddFunc(task.Definition, func() {
+				// grab the memberlist, and then use rendezvous hashing to
+				// decide if this node, or another, is the real one that should
+				// do the execution of the task
+				fmt.Println(task.Name + " " + task.Code)
+			})
+			if addErr != nil {
+				return addErr
+			}
+			task.id = int(newId)
+
+			jsonData, jsonErr := json.Marshal(task)
+			if jsonErr != nil {
+				return jsonErr
+			}
+
+			return b.Put([]byte(task.Code), jsonData)
+		})
+		if err != nil {
+			log.Error(err)
+		}
+	}
 }
 
 type eventDelegate struct{}
@@ -95,13 +224,15 @@ var rootCmd = &cobra.Command{
 	Short: "A brief description of your application",
 	Long:  `A longer description`,
 	Run: func(cmd *cobra.Command, args []string) {
-		db, err := bolt.Open(viper.GetString("db.file"), 0600, nil)
+
+		var err error
+		db, err = bolt.Open(viper.GetString("db.file"), 0600, nil)
 		if err != nil {
 			log.Fatal(err)
 		}
 		defer db.Close()
 
-		sched := cron.New()
+		sched = cron.New()
 
 		dbErr := db.Update(func(tx *bolt.Tx) error {
 			// Assume bucket exists and has keys
@@ -236,16 +367,24 @@ var rootCmd = &cobra.Command{
 					return jsonErr
 				}
 
-				broadcasts.QueueBroadcast(&broadcast{
-					msg:    jsonData,
-					notify: nil,
-				})
-
 				return b.Put([]byte(newTask.Code), jsonData)
 			})
 			if err != nil {
 				log.Fatal(err)
 			}
+
+			msgData, msgErr := json.Marshal(action{
+				Type: ADD,
+				Task: newTask,
+			})
+			if msgErr != nil {
+				log.Fatal(msgErr)
+			}
+
+			broadcasts.QueueBroadcast(&broadcast{
+				msg:    msgData,
+				notify: nil,
+			})
 
 			c.JSON(200, newTask)
 		})
