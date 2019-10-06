@@ -15,10 +15,10 @@ import (
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/pborman/uuid"
 	"github.com/robfig/cron/v3"
+	"github.com/serialx/hashring"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	//"github.com/tidwall/gjson"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -28,6 +28,7 @@ var (
 	broadcasts *memberlist.TransmitLimitedQueue
 	db         *bolt.DB
 	sched      *cron.Cron
+	ring       *hashring.HashRing
 )
 
 type task struct {
@@ -81,7 +82,8 @@ func (d *delegate) NotifyMsg(b []byte) {
 				// grab the memberlist, and then use rendezvous hashing to
 				// decide if this node, or another, is the real one that should
 				// do the execution of the task
-				fmt.Println(actionMsg.Task.Name + " " + actionMsg.Task.Code)
+				ringNode, _ := ring.GetNode(actionMsg.Task.Code)
+				fmt.Println(actionMsg.Task.Name + " " + actionMsg.Task.Code + " " + ringNode)
 			})
 			if addErr != nil {
 				return addErr
@@ -166,7 +168,8 @@ func (d *delegate) MergeRemoteState(buf []byte, join bool) {
 				// grab the memberlist, and then use rendezvous hashing to
 				// decide if this node, or another, is the real one that should
 				// do the execution of the task
-				fmt.Println(task.Name + " " + task.Code)
+				ringNode, _ := ring.GetNode(task.Code)
+				fmt.Println(task.Name + " " + task.Code + " " + ringNode)
 			})
 			if addErr != nil {
 				return addErr
@@ -189,10 +192,12 @@ func (d *delegate) MergeRemoteState(buf []byte, join bool) {
 type eventDelegate struct{}
 
 func (ed *eventDelegate) NotifyJoin(node *memberlist.Node) {
+	ring = ring.AddNode(node.String())
 	fmt.Println("A node has joined: " + node.String())
 }
 
 func (ed *eventDelegate) NotifyLeave(node *memberlist.Node) {
+	ring = ring.RemoveNode(node.String())
 	fmt.Println("A node has left: " + node.String())
 }
 
@@ -224,7 +229,6 @@ var rootCmd = &cobra.Command{
 	Short: "A brief description of your application",
 	Long:  `A longer description`,
 	Run: func(cmd *cobra.Command, args []string) {
-
 		var err error
 		db, err = bolt.Open(viper.GetString("db.file"), 0600, nil)
 		if err != nil {
@@ -249,7 +253,8 @@ var rootCmd = &cobra.Command{
 				}
 
 				newId, addErr := sched.AddFunc(oldTask.Definition, func() {
-					fmt.Println(oldTask.Name + " " + oldTask.Code)
+					ringNode, _ := ring.GetNode(oldTask.Code)
+					fmt.Println(oldTask.Name + " " + oldTask.Code + " " + ringNode)
 				})
 				if addErr != nil {
 					return addErr
@@ -278,6 +283,8 @@ var rootCmd = &cobra.Command{
 		c.Delegate = &delegate{}
 		c.BindPort = viper.GetInt("local.gossip")
 		c.Name = hostname + "-" + uuid.NewRandom().String()
+
+		ring = hashring.New([]string{c.Name})
 
 		m, err := memberlist.Create(c)
 		if err != nil {
@@ -355,7 +362,8 @@ var rootCmd = &cobra.Command{
 					// grab the memberlist, and then use rendezvous hashing to
 					// decide if this node, or another, is the real one that should
 					// do the execution of the task
-					fmt.Println(newTask.Name + " " + newTask.Code)
+					ringNode, _ := ring.GetNode(newTask.Code)
+					fmt.Println(newTask.Name + " " + newTask.Code + " " + ringNode)
 				})
 				if addErr != nil {
 					return addErr
