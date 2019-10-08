@@ -284,7 +284,7 @@ var rootCmd = &cobra.Command{
 		c.BindPort = viper.GetInt("local.gossip")
 		c.Name = hostname + "-" + uuid.NewRandom().String()
 
-		ring = hashring.New([]string{c.Name})
+		ring = hashring.New([]string{})
 
 		m, err := memberlist.Create(c)
 		if err != nil {
@@ -307,6 +307,11 @@ var rootCmd = &cobra.Command{
 
 		node := m.LocalNode()
 		log.Printf("Local member %s:%d\n", node.Addr, node.Port)
+
+		for _, mem := range m.Members() {
+			fmt.Println(mem.String())
+			ring = ring.AddNode(mem.String())
+		}
 
 		gin.SetMode("debug")
 		r := gin.New()
